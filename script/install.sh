@@ -576,7 +576,20 @@ show_menu() {
     echo "=========================================="
 }
 
+# Main execution
 check_root
+
+# Check if called with --auto flag for automatic certificate issuance
+if [[ "$1" == "--auto" ]]; then
+    echo "=========================================="
+    echo "  Automatic SSL Certificate Setup"
+    echo "=========================================="
+    echo ""
+    issue_certificate
+    exit $?
+fi
+
+# Interactive menu mode
 while true; do
     show_menu
     read -p "Select option [0-4]: " choice < /dev/tty
@@ -1078,13 +1091,31 @@ function PostInstall() {
     
     if [ "$ssl_choice" = "y" ] || [ "$ssl_choice" = "Y" ]; then
         echo ""
+        echo "=========================================="
+        echo "  Starting SSL Configuration"
+        echo "=========================================="
+        echo ""
+        
         if [ -f "/usr/local/bin/synctv-ssl" ]; then
-            echo "Starting SSL configuration..."
-            /usr/local/bin/synctv-ssl
+            # Execute SSL script in auto mode
+            /usr/local/bin/synctv-ssl --auto
+            
+            # Check if it executed successfully
+            if [ $? -eq 0 ]; then
+                echo ""
+                print_info "✓ SSL configuration completed successfully"
+            else
+                echo ""
+                print_warn "SSL configuration encountered an issue"
+                echo "You can try again with: sudo synctv ssl"
+            fi
         else
             echo "Error: SSL management script not found at /usr/local/bin/synctv-ssl"
             echo "Please run: sudo synctv ssl"
         fi
+        
+        echo ""
+        echo "=========================================="
     else
         echo ""
         echo "You can configure SSL later with: sudo synctv ssl"
