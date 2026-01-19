@@ -288,14 +288,13 @@ function InstallManagementScript() {
     cat <<'SSL_SCRIPT_EOF' > /usr/local/bin/synctv-ssl
 #!/bin/bash
 # SyncTV SSL Certificate Manager
-set -e
+# Debug: Script started
 CERT_DIR="/opt/synctv/cert"
 ACME_HOME="$HOME/.acme.sh"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 print_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 print_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-check_root() { [ "$EUID" -ne 0 ] && { print_error "Please run as root or with sudo"; exit 1; }; }
 check_acme_installed() { [ -f "$ACME_HOME/acme.sh" ]; }
 
 is_port_in_use() {
@@ -577,7 +576,11 @@ show_menu() {
 }
 
 # Main execution
-check_root
+# Check root privileges
+if [ "$EUID" -ne 0 ]; then
+    print_error "Please run as root or with sudo"
+    exit 1
+fi
 
 # Check if called with --auto flag for automatic certificate issuance
 if [[ "$1" == "--auto" ]]; then
@@ -586,7 +589,8 @@ if [[ "$1" == "--auto" ]]; then
     echo "=========================================="
     echo ""
     issue_certificate
-    exit $?
+    exit_code=$?
+    exit $exit_code
 fi
 
 # Interactive menu mode
@@ -1103,10 +1107,10 @@ function PostInstall() {
             # Check if it executed successfully
             if [ $? -eq 0 ]; then
                 echo ""
-                print_info "✓ SSL configuration completed successfully"
+                echo "✓ SSL configuration completed successfully"
             else
                 echo ""
-                print_warn "SSL configuration encountered an issue"
+                echo "⚠ SSL configuration encountered an issue"
                 echo "You can try again with: sudo synctv ssl"
             fi
         else
