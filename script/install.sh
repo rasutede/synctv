@@ -282,7 +282,46 @@ EOF
 }
 
 function InstallManagementScript() {
-    echo "Installing management script..."
+    echo "Installing management scripts..."
+    
+    # Get the directory where the install script is located
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Copy SSL manager script if it exists
+    if [ -f "$SCRIPT_DIR/ssl-manager.sh" ]; then
+        cp "$SCRIPT_DIR/ssl-manager.sh" /usr/local/bin/synctv-ssl
+        chmod +x /usr/local/bin/synctv-ssl
+        echo "SSL manager script installed"
+    elif [ -f "./script/ssl-manager.sh" ]; then
+        cp "./script/ssl-manager.sh" /usr/local/bin/synctv-ssl
+        chmod +x /usr/local/bin/synctv-ssl
+        echo "SSL manager script installed"
+    else
+        echo "Warning: SSL manager script not found, will be created inline"
+        # Create a basic SSL manager script inline
+        cat <<'SSL_EOF' > /usr/local/bin/synctv-ssl
+#!/bin/bash
+echo "SSL Certificate Management"
+echo "For full SSL management, please download ssl-manager.sh from the repository"
+echo ""
+echo "Quick SSL setup:"
+echo "1. Install acme.sh: curl https://get.acme.sh | sh"
+echo "2. Issue certificate: ~/.acme.sh/acme.sh --issue --server letsencrypt --cert-profile shortlived --days 3 -d YOUR_IP --webroot /opt/synctv/public"
+echo "3. Install certificate: ~/.acme.sh/acme.sh --install-cert -d YOUR_IP --key-file /opt/synctv/cert/key.pem --fullchain-file /opt/synctv/cert/cert.pem"
+SSL_EOF
+        chmod +x /usr/local/bin/synctv-ssl
+    fi
+    
+    # Copy uninstall script if it exists
+    if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
+        cp "$SCRIPT_DIR/uninstall.sh" /usr/local/bin/synctv-uninstall
+        chmod +x /usr/local/bin/synctv-uninstall
+        echo "Uninstall script installed"
+    elif [ -f "./script/uninstall.sh" ]; then
+        cp "./script/uninstall.sh" /usr/local/bin/synctv-uninstall
+        chmod +x /usr/local/bin/synctv-uninstall
+        echo "Uninstall script installed"
+    fi
     
     # Create synctv-menu script
     cat <<'MENU_EOF' > /usr/local/bin/synctv-menu
@@ -630,22 +669,11 @@ MENU_EOF
 
     chmod +x /usr/local/bin/synctv-menu
     
-    # Create symlink
-    ln -sf /usr/local/bin/synctv-menu /usr/local/bin/synctv
+    # Create symlink (remove old one first if exists)
+    rm -f /usr/local/bin/synctv
+    ln -s /usr/local/bin/synctv-menu /usr/local/bin/synctv
     
-    # Copy SSL manager script
-    if [ -f "./script/ssl-manager.sh" ]; then
-        cp "./script/ssl-manager.sh" /usr/local/bin/synctv-ssl
-        chmod +x /usr/local/bin/synctv-ssl
-    fi
-    
-    # Copy uninstall script
-    if [ -f "./script/uninstall.sh" ]; then
-        cp "./script/uninstall.sh" /usr/local/bin/synctv-uninstall
-        chmod +x /usr/local/bin/synctv-uninstall
-    fi
-    
-    echo "Management script installed successfully"
+    echo "Management scripts installed successfully"
     echo "You can now use 'synctv' command to manage the service"
 }
 
@@ -679,6 +707,12 @@ function PostInstall() {
     echo "=========================================="
     echo ""
     
+    # Verify management scripts are installed
+    if [ ! -f "/usr/local/bin/synctv" ]; then
+        echo "Warning: Management script not found at /usr/local/bin/synctv"
+        echo "You may need to add /usr/local/bin to your PATH"
+    fi
+    
     # Ask to start service
     read -p "Do you want to start SyncTV now? (y/n): " start_choice
     if [ "$start_choice" = "y" ] || [ "$start_choice" = "Y" ]; then
@@ -702,6 +736,12 @@ function PostInstall() {
     
     echo ""
     echo "=========================================="
+    echo "  SSL Certificate Configuration"
+    echo "=========================================="
+    echo ""
+    echo "Note: SyncTV is currently running on HTTP only."
+    echo "To enable HTTPS, you need to configure SSL certificates."
+    echo ""
     
     # Ask about SSL configuration
     read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
@@ -710,11 +750,19 @@ function PostInstall() {
         if [ -f "/usr/local/bin/synctv-ssl" ]; then
             /usr/local/bin/synctv-ssl
         else
-            echo "SSL management script not found"
+            echo "Error: SSL management script not found at /usr/local/bin/synctv-ssl"
+            echo "Please check the installation or download ssl-manager.sh manually"
         fi
     else
         echo ""
         echo "You can configure SSL later with: sudo synctv ssl"
+        echo ""
+        echo "Quick SSL setup steps:"
+        echo "1. Run: sudo synctv ssl"
+        echo "2. Select 'Issue IP Certificate'"
+        echo "3. Enter your public IP address"
+        echo "4. Wait for certificate issuance"
+        echo "5. Restart SyncTV to apply changes"
     fi
     
     echo ""
@@ -731,6 +779,10 @@ function PostInstall() {
     echo "  synctv logs         - View live logs"
     echo "  synctv ssl          - SSL certificate management"
     echo "  synctv uninstall    - Uninstall SyncTV"
+    echo ""
+    echo "Access SyncTV:"
+    echo "  HTTP:  http://YOUR_IP:8080"
+    echo "  HTTPS: https://YOUR_IP:8443 (after SSL configuration)"
     echo ""
     echo "For more commands, run: synctv help"
     echo "=========================================="
