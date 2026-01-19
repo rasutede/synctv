@@ -83,21 +83,53 @@ function RemoveService() {
 }
 
 function RemoveBinary() {
-    echo "Removing synctv binary..."
+    echo "Removing synctv binary and management scripts..."
+    
+    # Remove main binary
     if [ -f "/usr/bin/synctv" ]; then
         rm -f "/usr/bin/synctv"
-        echo "Binary removed from /usr/bin/synctv"
+        echo "✓ Binary removed from /usr/bin/synctv"
     else
-        echo "Binary not found at /usr/bin/synctv"
+        echo "○ Binary not found at /usr/bin/synctv"
     fi
     
-    # Remove management scripts
-    echo "Removing management scripts..."
-    rm -f /usr/local/bin/synctv-menu
-    rm -f /usr/local/bin/synctv-ssl
-    rm -f /usr/local/bin/synctv-uninstall
-    rm -f /usr/local/bin/synctv
-    echo "Management scripts removed"
+    # Remove all management scripts
+    local removed_count=0
+    
+    if [ -f "/usr/local/bin/synctv-menu" ]; then
+        rm -f /usr/local/bin/synctv-menu
+        ((removed_count++))
+    fi
+    
+    if [ -f "/usr/local/bin/synctv-ssl" ]; then
+        rm -f /usr/local/bin/synctv-ssl
+        ((removed_count++))
+    fi
+    
+    if [ -f "/usr/local/bin/synctv-uninstall" ]; then
+        rm -f /usr/local/bin/synctv-uninstall
+        ((removed_count++))
+    fi
+    
+    if [ -L "/usr/local/bin/synctv" ] || [ -f "/usr/local/bin/synctv" ]; then
+        rm -f /usr/local/bin/synctv
+        ((removed_count++))
+    fi
+    
+    if [ $removed_count -gt 0 ]; then
+        echo "✓ Management scripts removed ($removed_count files)"
+    else
+        echo "○ No management scripts found"
+    fi
+    
+    # Verify removal
+    if command -v synctv >/dev/null 2>&1; then
+        echo "⚠ Warning: 'synctv' command still available in PATH"
+        echo "  Location: $(which synctv)"
+        echo "  You may need to manually remove it or restart your shell"
+    else
+        echo "✓ All synctv commands removed successfully"
+    fi
 }
 
 function RemoveData() {
@@ -193,7 +225,14 @@ function ShowSummary() {
     
     echo "=========================================="
     echo ""
-    echo "SyncTV has been uninstalled successfully!"
+    echo "✓ SyncTV has been uninstalled successfully!"
+    echo ""
+    
+    # Check if synctv command still exists
+    if command -v synctv >/dev/null 2>&1; then
+        echo "⚠ IMPORTANT: Please close and reopen your terminal"
+        echo "  The 'synctv' command may still be cached in your current shell"
+    fi
     
     if [ "$KEEP_DATA" = true ]; then
         echo ""
@@ -206,6 +245,8 @@ function ShowSummary() {
         echo "Note: acme.sh is still installed"
         echo "To remove it, run the uninstall script with -a flag"
     fi
+    
+    echo ""
 }
 
 function Confirm() {

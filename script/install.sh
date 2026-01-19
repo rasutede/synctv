@@ -284,40 +284,101 @@ EOF
 function InstallManagementScript() {
     echo "Installing management scripts..."
     
-    # Get the directory where the install script is located
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    
-    # Copy SSL manager script if it exists
-    if [ -f "$SCRIPT_DIR/ssl-manager.sh" ]; then
-        cp "$SCRIPT_DIR/ssl-manager.sh" /usr/local/bin/synctv-ssl
-        chmod +x /usr/local/bin/synctv-ssl
-        echo "SSL manager script installed"
-    elif [ -f "./script/ssl-manager.sh" ]; then
-        cp "./script/ssl-manager.sh" /usr/local/bin/synctv-ssl
-        chmod +x /usr/local/bin/synctv-ssl
-        echo "SSL manager script installed"
-    else
-        echo "Warning: SSL manager script not found, will be created inline"
-        # Create a basic SSL manager script inline
-        cat <<'SSL_EOF' > /usr/local/bin/synctv-ssl
+    # Create SSL manager script (embedded)
+    cat <<'SSL_SCRIPT_EOF' > /usr/local/bin/synctv-ssl
 #!/bin/bash
-echo "SSL Certificate Management"
-echo "For full SSL management, please download ssl-manager.sh from the repository"
-echo ""
-echo "Quick SSL setup:"
-echo "1. Install acme.sh: curl https://get.acme.sh | sh"
-echo "2. Issue certificate: ~/.acme.sh/acme.sh --issue --server letsencrypt --cert-profile shortlived --days 3 -d YOUR_IP --webroot /opt/synctv/public"
-echo "3. Install certificate: ~/.acme.sh/acme.sh --install-cert -d YOUR_IP --key-file /opt/synctv/cert/key.pem --fullchain-file /opt/synctv/cert/cert.pem"
-SSL_EOF
-        chmod +x /usr/local/bin/synctv-ssl
-    fi
+# SyncTV SSL Certificate Manager
+set -e
+CERT_DIR="/opt/synctv/cert"
+WEBROOT="/opt/synctv/public"
+ACME_HOME="$HOME/.acme.sh"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+print_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+check_root() { [ "$EUID" -ne 0 ] && { print_error "Please run as root or with sudo"; exit 1; }; }
+check_acme_installed() { [ -f "$ACME_HOME/acme.sh" ]; }
+install_acme() {
+    print_info "Installing acme.sh..."
+    read -p "Enter your email address for certificate notifications: " email < /dev/tty
+    [ -z "$email" ] && email="admin@example.com"
+    curl -fsSL https://get.acme.sh | sh -s email="$email"
+    [ $? -ne 0 ] && { print_error "Failed to install acme.sh"; return 1; }
+    [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
+    print_info "acme.sh installed successfully"
+}
+is_valid_ipv4() {
+    local ip=$1
+    [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -ra ADDR <<< "$ip"
+    for i in "${ADDR[@]}"; do [ "$i" -gt 255 ] && return 1; done
+    return 0
+}
+get_public_ip() {
+    local ipv4=$(curl -s -4 https://api.ipify.org 2>/dev/null)
+    echo ""; print_info "Detected public IP: ${ipv4:-N/A}"; echo ""
+}
+issue_certificate() {
+    print_info "=== Issue IP Certificate ==="
+    check_acme_installed || {
+        print_warn "acme.sh is not installed"
+        read -p "Install acme.sh now? (y/n): " choice < /dev/tty
+        [[ "$choice" =~ ^[Yy]$ ]] && install_acme || { print_error "acme.sh required"; return 1; }
+    }
+    get_public_ip
+    read -p "Enter your public IP address: " ip_address < /dev/tty
+    [ -z "$ip_address" ] && { print_error "IP address cannot be empty"; return 1; }
+    is_valid_ipv4 "$ip_address" || { print_error "Invalid IP: $ip_address"; return 1; }
+    read -p "Enter webroot path [$WEBROOT]: " custom_webroot < /dev/tty
+    custom_webroot=${custom_webroot:-"$WEBROOT"}
+    print_info "Issuing certificate for IP: $ip_address"
+    mkdir -p "$custom_webroot"
+    [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
+    print_warn "IP certificates are valid for 7 days and auto-renew every 3 days"
+    "$ACME_HOME/acme.sh" --issue --server letsencrypt --cert-profile shortlived --days 3 -d "$ip_address" --webroot "$custom_webroot" --force || {
+        print_error "Failed to issue certificate"
+        echo "Troubleshooting: Ensure port 80 is accessible from internet"
+        return 1
+    }
+    mkdir -p "$CERT_DIR"
+    "$ACME_HOME/acme.sh" --install-cert -d "$ip_address" --key-file "$CERT_DIR/key.pem" --fullchain-file "$CERT_DIR/cert.pem" --reloadcmd "systemctl restart synctv 2>/dev/null || true"
+    [ $? -eq 0 ] && {
+        print_info "Certificate installed successfully!"
+        echo "Files: $CERT_DIR/key.pem, $CERT_DIR/cert.pem"
+        chmod 600 "$CERT_DIR/key.pem"; chmod 644 "$CERT_DIR/cert.pem"
+    } || print_error "Failed to install certificate"
+}
+show_menu() {
+    clear
+    echo "=========================================="
+    echo "  SyncTV SSL Certificate Manager"
+    echo "=========================================="
+    echo "1. Issue IP Certificate"
+    echo "2. Show Certificate Info"
+    echo "3. Setup/Check Auto-Renewal"
+    echo "0. Exit"
+    echo "=========================================="
+}
+check_root
+while true; do
+    show_menu
+    read -p "Select option [0-3]: " choice < /dev/tty
+    echo ""
+    case $choice in
+        1) issue_certificate ;;
+        2) check_acme_installed && { [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"; "$ACME_HOME/acme.sh" --list; } || print_error "acme.sh not installed" ;;
+        3) check_acme_installed && { crontab -l 2>/dev/null | grep -q "acme.sh" && print_info "Auto-renewal configured" || print_warn "Cron job not found"; } || print_error "acme.sh not installed" ;;
+        0) print_info "Exiting..."; exit 0 ;;
+        *) print_error "Invalid option" ;;
+    esac
+    echo ""; read -p "Press Enter to continue..." < /dev/tty
+done
+SSL_SCRIPT_EOF
+    chmod +x /usr/local/bin/synctv-ssl
+    echo "SSL manager script installed"
     
-    # Copy uninstall script if it exists
-    if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
-        cp "$SCRIPT_DIR/uninstall.sh" /usr/local/bin/synctv-uninstall
-        chmod +x /usr/local/bin/synctv-uninstall
-        echo "Uninstall script installed"
-    elif [ -f "./script/uninstall.sh" ]; then
+    # Copy uninstall script if it exists (for local installation)
+    if [ -f "./script/uninstall.sh" ]; then
         cp "./script/uninstall.sh" /usr/local/bin/synctv-uninstall
         chmod +x /usr/local/bin/synctv-uninstall
         echo "Uninstall script installed"
@@ -485,7 +546,7 @@ function uninstall_service() {
         return 1
     fi
     
-    print_warn "This will uninstall SyncTV"
+    print_warn "This will uninstall SyncTV and all management scripts"
     read -p "Are you sure? (yes/no): " confirm
     
     if [ "$confirm" != "yes" ]; then
@@ -495,7 +556,18 @@ function uninstall_service() {
     
     # Check if uninstall script exists
     if [ -f "/usr/local/bin/synctv-uninstall" ]; then
+        echo ""
+        print_info "Running uninstall script..."
         /usr/local/bin/synctv-uninstall
+        
+        # If uninstall was successful, inform user and exit
+        if [ $? -eq 0 ]; then
+            echo ""
+            print_info "Uninstallation complete. Please close this terminal."
+            echo ""
+            # Exit the script completely
+            exit 0
+        fi
     else
         print_error "Uninstall script not found"
         print_info "Manual uninstallation steps:"
@@ -504,6 +576,7 @@ function uninstall_service() {
         echo "  3. rm /etc/systemd/system/synctv.service"
         echo "  4. rm /usr/bin/synctv"
         echo "  5. rm -rf /opt/synctv"
+        echo "  6. rm /usr/local/bin/synctv*"
         return 1
     fi
 }
@@ -713,8 +786,8 @@ function PostInstall() {
         echo "You may need to add /usr/local/bin to your PATH"
     fi
     
-    # Ask to start service
-    read -p "Do you want to start SyncTV now? (y/n): " start_choice
+    # Ask to start service (read from /dev/tty for pipe installation)
+    read -p "Do you want to start SyncTV now? (y/n): " start_choice < /dev/tty
     if [ "$start_choice" = "y" ] || [ "$start_choice" = "Y" ]; then
         systemctl enable synctv
         systemctl start synctv
@@ -743,8 +816,8 @@ function PostInstall() {
     echo "To enable HTTPS, you need to configure SSL certificates."
     echo ""
     
-    # Ask about SSL configuration
-    read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
+    # Ask about SSL configuration (read from /dev/tty for pipe installation)
+    read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice < /dev/tty
     if [ "$ssl_choice" = "y" ] || [ "$ssl_choice" = "Y" ]; then
         echo ""
         if [ -f "/usr/local/bin/synctv-ssl" ]; then
