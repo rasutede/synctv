@@ -317,6 +317,47 @@ install_acme() {
     print_info "acme.sh installed successfully"
 }
 
+install_dependencies() {
+    print_info "Installing required dependencies..."
+    
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        print_warn "Cannot detect OS, assuming Debian/Ubuntu"
+        OS="ubuntu"
+    fi
+    
+    # Install socat based on OS
+    case "$OS" in
+        ubuntu|debian)
+            apt-get update -qq && apt-get install -y socat curl >/dev/null 2>&1
+            ;;
+        centos|rhel|fedora|rocky|almalinux)
+            yum install -y socat curl >/dev/null 2>&1 || dnf install -y socat curl >/dev/null 2>&1
+            ;;
+        arch|manjaro)
+            pacman -Sy --noconfirm socat curl >/dev/null 2>&1
+            ;;
+        alpine)
+            apk add --no-cache socat curl >/dev/null 2>&1
+            ;;
+        *)
+            print_warn "Unknown OS: $OS, trying apt-get..."
+            apt-get update -qq && apt-get install -y socat curl >/dev/null 2>&1
+            ;;
+    esac
+    
+    if command -v socat >/dev/null 2>&1; then
+        print_info "Dependencies installed successfully"
+        return 0
+    else
+        print_error "Failed to install socat"
+        return 1
+    fi
+}
+
 is_valid_ipv4() {
     [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
     IFS='.' read -ra ADDR <<< "$1"
@@ -342,6 +383,21 @@ issue_certificate() {
     print_warn "IP certificates are valid for ~6 days and will auto-renew"
     print_warn "Port 80 must be open and accessible from the internet"
     echo ""
+    
+    # Check for socat
+    if ! command -v socat >/dev/null 2>&1; then
+        print_warn "socat is not installed (required for standalone mode)"
+        read -p "Install socat now? (y/n): " install_choice < /dev/tty
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            install_dependencies || {
+                print_error "Failed to install dependencies"
+                return 1
+            }
+        else
+            print_error "socat is required for standalone mode"
+            return 1
+        fi
+    fi
     
     check_acme_installed || {
         print_warn "acme.sh is not installed"
@@ -401,7 +457,7 @@ issue_certificate() {
         -d "${ipv4}" \
         --standalone \
         --server letsencrypt \
-        --keylength ec-256 \
+        --certificate-profile shortlived \
         --days 6 \
         --httpport ${WebPort} \
         --force
@@ -1048,13 +1104,11 @@ function PostInstall() {
     fi
     
     # Ask to start service (read from /dev/tty for pipe installation)
-    if [ -t 0 ]; then
-        # Interactive terminal
-        read -p "Do you want to start SyncTV now? (y/n): " start_choice
-    else
-        # Non-interactive (pipe), read from tty
-        read -p "Do you want to start SyncTV now? (y/n): " start_choice < /dev/tty
-    fi
+    # Redirect stdin from /dev/tty for interactive prompts in pipe mode
+    exec < /dev/tty
+    
+    # Ask to start service
+    read -p "Do you want to start SyncTV now? (y/n): " start_choice
     
     if [ "$start_choice" = "y" ] || [ "$start_choice" = "Y" ]; then
         systemctl enable synctv
@@ -1087,11 +1141,7 @@ function PostInstall() {
     echo ""
     
     # Ask about SSL configuration (read from /dev/tty for pipe installation)
-    if [ -t 0 ]; then
-        read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
-    else
-        read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice < /dev/tty
-    fi
+    read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
     
     if [ "$ssl_choice" = "y" ] || [ "$ssl_choice" = "Y" ]; then
         echo ""
