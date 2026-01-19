@@ -462,19 +462,104 @@ issue_certificate() {
     openssl x509 -in "${CERT_DIR}/cert.pem" -noout -dates 2>/dev/null || true
     
     echo ""
-    print_warn "IMPORTANT: Configure SyncTV to use HTTPS"
-    echo "Add to your SyncTV config:"
-    echo "  server:"
-    echo "    https:"
-    echo "      enabled: true"
-    echo "      listen: \":443\""
-    echo "      cert_file: \"${CERT_DIR}/cert.pem\""
-    echo "      key_file: \"${CERT_DIR}/key.pem\""
+    echo "=========================================="
+    print_info "Certificate issued successfully!"
+    echo "=========================================="
     echo ""
-    read -p "Restart SyncTV now to apply changes? (y/n): " restart_choice < /dev/tty
-    if [[ "$restart_choice" =~ ^[Yy]$ ]]; then
+    print_warn "NEXT STEP: Configure SyncTV to use HTTPS"
+    echo ""
+    echo "SyncTV needs to be configured to use the certificate."
+    echo "You have two options:"
+    echo ""
+    echo "Option 1: Automatic Configuration (Recommended)"
+    echo "  - Automatically update SyncTV settings"
+    echo "  - Enable HTTPS on port 443"
+    echo "  - Restart service"
+    echo ""
+    echo "Option 2: Manual Configuration"
+    echo "  - You configure SyncTV yourself"
+    echo "  - More control over settings"
+    echo ""
+    
+    read -p "Choose option (1=Auto, 2=Manual, Enter=Auto): " config_choice < /dev/tty
+    config_choice=${config_choice:-1}
+    
+    if [[ "$config_choice" == "1" ]]; then
+        print_info "Configuring SyncTV for HTTPS..."
+        
+        # Check if SyncTV binary supports cert command
+        if /usr/bin/synctv --help 2>&1 | grep -q "cert"; then
+            # Use SyncTV's built-in cert command if available
+            /usr/bin/synctv cert --cert-file "${CERT_DIR}/cert.pem" --key-file "${CERT_DIR}/key.pem" 2>/dev/null || true
+        fi
+        
+        # Create or update config file
+        local config_file="/opt/synctv/config.yaml"
+        if [ ! -f "$config_file" ]; then
+            print_info "Creating HTTPS configuration..."
+            cat > "$config_file" <<EOF
+server:
+  http:
+    listen: ":8080"
+  https:
+    enabled: true
+    listen: ":443"
+    cert_file: "${CERT_DIR}/cert.pem"
+    key_file: "${CERT_DIR}/key.pem"
+EOF
+            print_info "Configuration file created at $config_file"
+        else
+            print_warn "Config file exists. Please manually add HTTPS configuration:"
+            echo ""
+            echo "Add these lines to $config_file:"
+            echo ""
+            echo "server:"
+            echo "  https:"
+            echo "    enabled: true"
+            echo "    listen: \":443\""
+            echo "    cert_file: \"${CERT_DIR}/cert.pem\""
+            echo "    key_file: \"${CERT_DIR}/key.pem\""
+            echo ""
+        fi
+        
+        # Restart SyncTV
+        print_info "Restarting SyncTV..."
         systemctl restart synctv
-        print_info "SyncTV restarted"
+        sleep 2
+        
+        if systemctl is-active --quiet synctv; then
+            print_info "✓ SyncTV restarted successfully"
+            echo ""
+            echo "=========================================="
+            print_info "HTTPS is now enabled!"
+            echo "=========================================="
+            echo ""
+            echo "Access your SyncTV instance:"
+            echo "  HTTP:  http://${ipv4}:8080"
+            echo "  HTTPS: https://${ipv4}:443"
+            echo ""
+            print_warn "Note: You may need to open port 443 in your firewall"
+        else
+            print_error "Failed to restart SyncTV"
+            echo "Check logs with: sudo journalctl -u synctv -n 50"
+        fi
+    else
+        print_info "Manual configuration selected"
+        echo ""
+        echo "To enable HTTPS, add this to your SyncTV config:"
+        echo ""
+        echo "File: /opt/synctv/config.yaml"
+        echo ""
+        echo "server:"
+        echo "  http:"
+        echo "    listen: \":8080\""
+        echo "  https:"
+        echo "    enabled: true"
+        echo "    listen: \":443\""
+        echo "    cert_file: \"${CERT_DIR}/cert.pem\""
+        echo "    key_file: \"${CERT_DIR}/key.pem\""
+        echo ""
+        echo "Then restart: sudo systemctl restart synctv"
     fi
 }
 
@@ -946,7 +1031,14 @@ function PostInstall() {
     fi
     
     # Ask to start service (read from /dev/tty for pipe installation)
-    read -p "Do you want to start SyncTV now? (y/n): " start_choice < /dev/tty
+    if [ -t 0 ]; then
+        # Interactive terminal
+        read -p "Do you want to start SyncTV now? (y/n): " start_choice
+    else
+        # Non-interactive (pipe), read from tty
+        read -p "Do you want to start SyncTV now? (y/n): " start_choice < /dev/tty
+    fi
+    
     if [ "$start_choice" = "y" ] || [ "$start_choice" = "Y" ]; then
         systemctl enable synctv
         systemctl start synctv
@@ -971,19 +1063,27 @@ function PostInstall() {
     echo "  SSL Certificate Configuration"
     echo "=========================================="
     echo ""
-    echo "Note: SyncTV is currently running on HTTP only."
-    echo "To enable HTTPS, you need to configure SSL certificates."
+    echo "⚠ IMPORTANT: SyncTV is currently running on HTTP only."
+    echo "To enable HTTPS, you need to:"
+    echo "  1. Issue an SSL certificate"
+    echo "  2. Configure SyncTV to use the certificate"
     echo ""
     
     # Ask about SSL configuration (read from /dev/tty for pipe installation)
-    read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice < /dev/tty
+    if [ -t 0 ]; then
+        read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
+    else
+        read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice < /dev/tty
+    fi
+    
     if [ "$ssl_choice" = "y" ] || [ "$ssl_choice" = "Y" ]; then
         echo ""
         if [ -f "/usr/local/bin/synctv-ssl" ]; then
+            echo "Starting SSL configuration..."
             /usr/local/bin/synctv-ssl
         else
             echo "Error: SSL management script not found at /usr/local/bin/synctv-ssl"
-            echo "Please check the installation or download ssl-manager.sh manually"
+            echo "Please run: sudo synctv ssl"
         fi
     else
         echo ""
@@ -993,8 +1093,8 @@ function PostInstall() {
         echo "1. Run: sudo synctv ssl"
         echo "2. Select 'Issue IP Certificate'"
         echo "3. Enter your public IP address"
-        echo "4. Wait for certificate issuance"
-        echo "5. Restart SyncTV to apply changes"
+        echo "4. Certificate will be saved to /opt/synctv/cert/"
+        echo "5. Configure SyncTV to use HTTPS (see below)"
     fi
     
     echo ""
@@ -1014,7 +1114,12 @@ function PostInstall() {
     echo ""
     echo "Access SyncTV:"
     echo "  HTTP:  http://YOUR_IP:8080"
-    echo "  HTTPS: https://YOUR_IP:8443 (after SSL configuration)"
+    echo ""
+    echo "After SSL configuration:"
+    echo "  HTTPS: https://YOUR_IP:8443"
+    echo ""
+    echo "⚠ Note: After issuing SSL certificate, you need to configure"
+    echo "  SyncTV to use HTTPS. The SSL script will guide you through this."
     echo ""
     echo "For more commands, run: synctv help"
     echo "=========================================="

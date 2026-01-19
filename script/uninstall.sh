@@ -2,6 +2,23 @@
 
 # SyncTV Uninstall Script
 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+function print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+function print_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+function print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
 function Help() {
     echo "Usage: sudo bash uninstall.sh [options]"
     echo "-h: help"
@@ -14,7 +31,7 @@ function Help() {
 function Init() {
     # Check if the user is root or sudo
     if [ "$EUID" -ne 0 ]; then
-        echo "Please run as root"
+        print_error "Please run as root"
         exit 1
     fi
     
@@ -52,129 +69,142 @@ function ParseArgs() {
 }
 
 function StopService() {
-    echo "Stopping synctv service..."
-    if systemctl is-active --quiet synctv; then
-        systemctl stop synctv
-        echo "Service stopped"
+    print_info "Stopping synctv service..."
+    
+    # Check if service exists and is running
+    if systemctl list-units --full -all | grep -q "synctv.service"; then
+        if systemctl is-active --quiet synctv; then
+            print_info "Service is running, stopping now..."
+            systemctl stop synctv
+            
+            # Wait for service to stop
+            local count=0
+            while systemctl is-active --quiet synctv && [ $count -lt 10 ]; do
+                sleep 1
+                ((count++))
+            done
+            
+            if systemctl is-active --quiet synctv; then
+                print_warn "Service did not stop gracefully, forcing stop..."
+                systemctl kill synctv 2>/dev/null || true
+                sleep 2
+            fi
+            
+            print_info "Service stopped"
+        else
+            print_info "Service is not running"
+        fi
     else
-        echo "Service is not running"
+        print_info "Service not found"
     fi
 }
 
 function DisableService() {
-    echo "Disabling synctv service..."
+    print_info "Disabling synctv service..."
     if systemctl is-enabled --quiet synctv 2>/dev/null; then
         systemctl disable synctv
-        echo "Service disabled"
+        print_info "Service disabled"
     else
-        echo "Service is not enabled"
+        print_info "Service is not enabled"
     fi
 }
 
 function RemoveService() {
-    echo "Removing systemd service..."
+    print_info "Removing systemd service..."
     if [ -f "/etc/systemd/system/synctv.service" ]; then
         rm -f "/etc/systemd/system/synctv.service"
         systemctl daemon-reload
-        echo "Service file removed"
+        systemctl reset-failed 2>/dev/null || true
+        print_info "Service file removed"
     else
-        echo "Service file not found"
+        print_info "Service file not found"
     fi
 }
 
 function RemoveBinary() {
-    echo "Removing synctv binary and management scripts..."
+    print_info "Removing synctv binary and management scripts..."
     
     # Remove main binary
     if [ -f "/usr/bin/synctv" ]; then
         rm -f "/usr/bin/synctv"
-        echo "✓ Binary removed from /usr/bin/synctv"
+        print_info "✓ Binary removed from /usr/bin/synctv"
     else
-        echo "○ Binary not found at /usr/bin/synctv"
+        print_info "○ Binary not found at /usr/bin/synctv"
     fi
     
     # Remove all management scripts
     local removed_count=0
+    local scripts=("synctv-menu" "synctv-ssl" "synctv-uninstall" "synctv")
     
-    if [ -f "/usr/local/bin/synctv-menu" ]; then
-        rm -f /usr/local/bin/synctv-menu
-        ((removed_count++))
-    fi
-    
-    if [ -f "/usr/local/bin/synctv-ssl" ]; then
-        rm -f /usr/local/bin/synctv-ssl
-        ((removed_count++))
-    fi
-    
-    if [ -f "/usr/local/bin/synctv-uninstall" ]; then
-        rm -f /usr/local/bin/synctv-uninstall
-        ((removed_count++))
-    fi
-    
-    if [ -L "/usr/local/bin/synctv" ] || [ -f "/usr/local/bin/synctv" ]; then
-        rm -f /usr/local/bin/synctv
-        ((removed_count++))
-    fi
+    for script in "${scripts[@]}"; do
+        if [ -f "/usr/local/bin/$script" ] || [ -L "/usr/local/bin/$script" ]; then
+            rm -f "/usr/local/bin/$script"
+            ((removed_count++))
+        fi
+    done
     
     if [ $removed_count -gt 0 ]; then
-        echo "✓ Management scripts removed ($removed_count files)"
+        print_info "✓ Management scripts removed ($removed_count files)"
     else
-        echo "○ No management scripts found"
+        print_info "○ No management scripts found"
     fi
+    
+    # Clear command hash cache
+    hash -r 2>/dev/null || true
     
     # Verify removal
     if command -v synctv >/dev/null 2>&1; then
-        echo "⚠ Warning: 'synctv' command still available in PATH"
-        echo "  Location: $(which synctv)"
-        echo "  You may need to manually remove it or restart your shell"
+        print_warn "⚠ 'synctv' command still available in PATH"
+        print_warn "  Location: $(which synctv)"
+        print_warn "  You may need to restart your shell"
     else
-        echo "✓ All synctv commands removed successfully"
+        print_info "✓ All synctv commands removed successfully"
     fi
 }
 
 function RemoveData() {
     if [ "$KEEP_DATA" = true ]; then
-        echo "Keeping data directory /opt/synctv"
+        print_info "Keeping data directory /opt/synctv"
         
         if [ "$KEEP_CERTS" = false ]; then
-            echo "Removing SSL certificates..."
+            print_info "Removing SSL certificates..."
             if [ -d "/opt/synctv/cert" ]; then
                 rm -rf "/opt/synctv/cert"
-                echo "Certificates removed"
+                print_info "Certificates removed"
             fi
         else
-            echo "Keeping SSL certificates"
+            print_info "Keeping SSL certificates"
         fi
     else
-        echo "Removing data directory..."
+        print_info "Removing data directory..."
         if [ -d "/opt/synctv" ]; then
             if [ "$KEEP_CERTS" = true ]; then
-                echo "Backing up certificates..."
+                print_info "Backing up certificates..."
                 if [ -d "/opt/synctv/cert" ]; then
                     mkdir -p /tmp/synctv-cert-backup
-                    cp -r /opt/synctv/cert/* /tmp/synctv-cert-backup/
-                    echo "Certificates backed up to /tmp/synctv-cert-backup"
+                    cp -r /opt/synctv/cert/* /tmp/synctv-cert-backup/ 2>/dev/null || true
+                    print_info "Certificates backed up to /tmp/synctv-cert-backup"
                 fi
             fi
             
             rm -rf "/opt/synctv"
-            echo "Data directory removed"
+            print_info "Data directory removed"
         else
-            echo "Data directory not found"
+            print_info "Data directory not found"
         fi
     fi
 }
 
 function RemoveAcme() {
     if [ "$REMOVE_ACME" = true ]; then
-        echo "Removing acme.sh..."
+        print_info "Removing acme.sh..."
         
         # Check if acme.sh is installed
         if [ -d "$HOME/.acme.sh" ]; then
             # Remove all certificates first
             if [ -f "$HOME/.acme.sh/acme.sh" ]; then
-                echo "Removing all certificates..."
-                "$HOME/.acme.sh/acme.sh" --uninstall
+                print_info "Removing all certificates..."
+                "$HOME/.acme.sh/acme.sh" --uninstall 2>/dev/null || true
             fi
             
             # Remove acme.sh directory
@@ -183,12 +213,15 @@ function RemoveAcme() {
             # Remove cron job
             crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null || true
             
-            echo "acme.sh removed"
+            # Remove acme.sh environment file
+            rm -f "$HOME/.acme.sh.env" 2>/dev/null || true
+            
+            print_info "acme.sh removed"
         else
-            echo "acme.sh not found"
+            print_info "acme.sh not found"
         fi
     else
-        echo "Keeping acme.sh (use -a flag to remove)"
+        print_info "Keeping acme.sh (use -a flag to remove)"
     fi
 }
 
@@ -197,6 +230,7 @@ function ShowSummary() {
     echo "=========================================="
     echo "  Uninstallation Summary"
     echo "=========================================="
+    echo "✓ SyncTV service stopped"
     echo "✓ SyncTV binary removed"
     echo "✓ Management scripts removed (synctv command)"
     echo "✓ Systemd service removed"
@@ -225,24 +259,27 @@ function ShowSummary() {
     
     echo "=========================================="
     echo ""
-    echo "✓ SyncTV has been uninstalled successfully!"
+    print_info "✓ SyncTV has been uninstalled successfully!"
     echo ""
     
     # Check if synctv command still exists
     if command -v synctv >/dev/null 2>&1; then
-        echo "⚠ IMPORTANT: Please close and reopen your terminal"
-        echo "  The 'synctv' command may still be cached in your current shell"
+        print_warn "⚠ IMPORTANT: Please close and reopen your terminal"
+        print_warn "  The 'synctv' command may still be cached in your current shell"
+        echo ""
+        echo "Run this command to clear the cache:"
+        echo "  hash -r"
     fi
     
     if [ "$KEEP_DATA" = true ]; then
         echo ""
-        echo "Note: Your data is still at /opt/synctv"
+        print_info "Note: Your data is still at /opt/synctv"
         echo "To completely remove it, run: sudo rm -rf /opt/synctv"
     fi
     
     if [ "$REMOVE_ACME" = false ] && [ -d "$HOME/.acme.sh" ]; then
         echo ""
-        echo "Note: acme.sh is still installed"
+        print_info "Note: acme.sh is still installed"
         echo "To remove it, run the uninstall script with -a flag"
     fi
     
@@ -260,6 +297,7 @@ function Confirm() {
     echo "=========================================="
     echo "This will remove:"
     echo "  - SyncTV binary"
+    echo "  - Management scripts"
     echo "  - Systemd service"
     
     if [ "$KEEP_DATA" = false ]; then
@@ -291,10 +329,18 @@ function Confirm() {
     
     echo "=========================================="
     echo ""
-    read -p "Are you sure you want to continue? (yes/no): " confirm
+    
+    # Check if service is running
+    if systemctl is-active --quiet synctv 2>/dev/null; then
+        print_warn "⚠ SyncTV service is currently running"
+        print_warn "  It will be stopped during uninstallation"
+        echo ""
+    fi
+    
+    read -p "Are you sure you want to continue? (yes/no): " confirm < /dev/tty
     
     if [ "$confirm" != "yes" ]; then
-        echo "Uninstallation cancelled"
+        print_info "Uninstallation cancelled"
         exit 0
     fi
 }
@@ -302,7 +348,7 @@ function Confirm() {
 function Uninstall() {
     Confirm
     echo ""
-    echo "Starting uninstallation..."
+    print_info "Starting uninstallation..."
     echo ""
     
     StopService
