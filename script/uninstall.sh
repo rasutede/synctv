@@ -87,11 +87,8 @@ function RemoveBinary() {
     if [ -f "/usr/bin/synctv" ]; then
         rm -f "/usr/bin/synctv"
         echo "Binary removed from /usr/bin/synctv"
-    elif [ -f "/usr/local/bin/synctv" ]; then
-        rm -f "/usr/local/bin/synctv"
-        echo "Binary removed from /usr/local/bin/synctv"
     else
-        echo "Binary not found"
+        echo "Binary not found at /usr/bin/synctv"
     fi
     
     # Remove management scripts
@@ -169,6 +166,7 @@ function ShowSummary() {
     echo "  Uninstallation Summary"
     echo "=========================================="
     echo "✓ SyncTV binary removed"
+    echo "✓ Management scripts removed (synctv command)"
     echo "✓ Systemd service removed"
     
     if [ "$KEEP_DATA" = true ]; then
@@ -206,7 +204,7 @@ function ShowSummary() {
     if [ "$REMOVE_ACME" = false ] && [ -d "$HOME/.acme.sh" ]; then
         echo ""
         echo "Note: acme.sh is still installed"
-        echo "To remove it, run: sudo bash uninstall.sh -a"
+        echo "To remove it, run the uninstall script with -a flag"
     fi
 }
 
