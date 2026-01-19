@@ -284,13 +284,12 @@ EOF
 function InstallManagementScript() {
     echo "Installing management scripts..."
     
-    # Create SSL manager script (embedded)
+    # Create SSL manager script (embedded, based on 3x-ui implementation)
     cat <<'SSL_SCRIPT_EOF' > /usr/local/bin/synctv-ssl
 #!/bin/bash
 # SyncTV SSL Certificate Manager
 set -e
 CERT_DIR="/opt/synctv/cert"
-WEBROOT="/opt/synctv/public"
 ACME_HOME="$HOME/.acme.sh"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 print_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -298,6 +297,17 @@ print_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 check_root() { [ "$EUID" -ne 0 ] && { print_error "Please run as root or with sudo"; exit 1; }; }
 check_acme_installed() { [ -f "$ACME_HOME/acme.sh" ]; }
+
+is_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p=":${port}$" '$4 ~ p {exit 0} END {exit 1}' && return 0
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -lnt 2>/dev/null | awk -v p=":${port} " '$4 ~ p {exit 0} END {exit 1}' && return 0
+    fi
+    return 1
+}
+
 install_acme() {
     print_info "Installing acme.sh..."
     read -p "Enter your email address for certificate notifications: " email < /dev/tty
@@ -307,47 +317,167 @@ install_acme() {
     [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
     print_info "acme.sh installed successfully"
 }
+
 is_valid_ipv4() {
-    local ip=$1
-    [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
-    IFS='.' read -ra ADDR <<< "$ip"
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -ra ADDR <<< "$1"
     for i in "${ADDR[@]}"; do [ "$i" -gt 255 ] && return 1; done
     return 0
 }
+
 get_public_ip() {
-    local ipv4=$(curl -s -4 https://api.ipify.org 2>/dev/null)
-    echo ""; print_info "Detected public IP: ${ipv4:-N/A}"; echo ""
+    local urls=("https://api4.ipify.org" "https://ipv4.icanhazip.com" "https://v4.api.ipinfo.io/ip")
+    for url in "${urls[@]}"; do
+        local ip=$(curl -s --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$ip" ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+    return 1
 }
+
 issue_certificate() {
-    print_info "=== Issue IP Certificate ==="
+    print_info "=== Issue Let's Encrypt IP Certificate ==="
+    echo ""
+    print_warn "IP certificates are valid for ~6 days and will auto-renew"
+    print_warn "Port 80 must be open and accessible from the internet"
+    echo ""
+    
     check_acme_installed || {
         print_warn "acme.sh is not installed"
         read -p "Install acme.sh now? (y/n): " choice < /dev/tty
         [[ "$choice" =~ ^[Yy]$ ]] && install_acme || { print_error "acme.sh required"; return 1; }
     }
-    get_public_ip
-    read -p "Enter your public IP address: " ip_address < /dev/tty
-    [ -z "$ip_address" ] && { print_error "IP address cannot be empty"; return 1; }
-    is_valid_ipv4 "$ip_address" || { print_error "Invalid IP: $ip_address"; return 1; }
-    read -p "Enter webroot path [$WEBROOT]: " custom_webroot < /dev/tty
-    custom_webroot=${custom_webroot:-"$WEBROOT"}
-    print_info "Issuing certificate for IP: $ip_address"
-    mkdir -p "$custom_webroot"
-    [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
-    print_warn "IP certificates are valid for 7 days and auto-renew every 3 days"
-    "$ACME_HOME/acme.sh" --issue --server letsencrypt --cert-profile shortlived --days 3 -d "$ip_address" --webroot "$custom_webroot" --force || {
-        print_error "Failed to issue certificate"
-        echo "Troubleshooting: Ensure port 80 is accessible from internet"
-        return 1
-    }
+    
+    # Get public IP
+    local detected_ip=$(get_public_ip)
+    if [[ -n "$detected_ip" ]]; then
+        print_info "Detected public IP: $detected_ip"
+    fi
+    echo ""
+    
+    read -p "Enter your public IPv4 address: " ipv4 < /dev/tty
+    [ -z "$ipv4" ] && { print_error "IP address cannot be empty"; return 1; }
+    is_valid_ipv4 "$ipv4" || { print_error "Invalid IPv4: $ipv4"; return 1; }
+    
+    # Choose port for HTTP-01 listener
+    local WebPort=80
+    read -p "Port to use for ACME HTTP-01 listener (default 80): " WebPort < /dev/tty
+    WebPort="${WebPort:-80}"
+    if ! [[ "${WebPort}" =~ ^[0-9]+$ ]] || ((WebPort < 1 || WebPort > 65535)); then
+        print_warn "Invalid port. Using default 80"
+        WebPort=80
+    fi
+    
+    # Check if port is in use
+    while is_port_in_use "${WebPort}"; do
+        print_warn "Port ${WebPort} is in use"
+        read -p "Enter another port (or press Enter to abort): " alt_port < /dev/tty
+        if [[ -z "$alt_port" ]]; then
+            print_error "Cannot proceed with port ${WebPort} in use"
+            return 1
+        fi
+        WebPort="$alt_port"
+    done
+    
+    print_info "Using port ${WebPort} for standalone validation"
+    
+    # Stop SyncTV temporarily to free port 80
+    if [[ "${WebPort}" -eq 80 ]]; then
+        print_info "Stopping SyncTV temporarily..."
+        systemctl stop synctv 2>/dev/null || true
+    fi
+    
+    # Create certificate directory
     mkdir -p "$CERT_DIR"
-    "$ACME_HOME/acme.sh" --install-cert -d "$ip_address" --key-file "$CERT_DIR/key.pem" --fullchain-file "$CERT_DIR/cert.pem" --reloadcmd "systemctl restart synctv 2>/dev/null || true"
-    [ $? -eq 0 ] && {
-        print_info "Certificate installed successfully!"
-        echo "Files: $CERT_DIR/key.pem, $CERT_DIR/cert.pem"
-        chmod 600 "$CERT_DIR/key.pem"; chmod 644 "$CERT_DIR/cert.pem"
-    } || print_error "Failed to install certificate"
+    
+    # Source acme.sh environment
+    [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
+    
+    # Issue certificate with standalone mode
+    print_info "Issuing certificate for ${ipv4}..."
+    "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
+    "$ACME_HOME/acme.sh" --issue \
+        -d "${ipv4}" \
+        --standalone \
+        --server letsencrypt \
+        --keylength ec-256 \
+        --days 6 \
+        --httpport ${WebPort} \
+        --force
+    
+    local issue_result=$?
+    
+    # Restart SyncTV if we stopped it
+    if [[ "${WebPort}" -eq 80 ]]; then
+        print_info "Restarting SyncTV..."
+        systemctl start synctv 2>/dev/null || true
+    fi
+    
+    if [ $issue_result -ne 0 ]; then
+        print_error "Failed to issue certificate"
+        echo ""
+        print_warn "Troubleshooting:"
+        echo "  1. Ensure port ${WebPort} is accessible from the internet"
+        echo "  2. Check firewall settings"
+        echo "  3. Verify IP address is correct: ${ipv4}"
+        rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
+        return 1
+    fi
+    
+    print_info "Certificate issued successfully, installing..."
+    
+    # Install certificate
+    local reloadCmd="systemctl restart synctv 2>/dev/null || true"
+    "$ACME_HOME/acme.sh" --installcert -d "${ipv4}" \
+        --key-file "${CERT_DIR}/key.pem" \
+        --fullchain-file "${CERT_DIR}/cert.pem" \
+        --reloadcmd "${reloadCmd}" 2>&1 || true
+    
+    # Verify certificate files exist
+    if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
+        print_error "Certificate files not found after installation"
+        rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
+        return 1
+    fi
+    
+    # Set permissions
+    chmod 600 "${CERT_DIR}/key.pem" 2>/dev/null
+    chmod 644 "${CERT_DIR}/cert.pem" 2>/dev/null
+    
+    # Enable auto-upgrade
+    "$ACME_HOME/acme.sh" --upgrade --auto-upgrade >/dev/null 2>&1
+    
+    print_info "Certificate installed successfully!"
+    echo ""
+    echo "Certificate files:"
+    echo "  Cert: ${CERT_DIR}/cert.pem"
+    echo "  Key:  ${CERT_DIR}/key.pem"
+    echo ""
+    print_info "Certificate valid for ~6 days, auto-renews via acme.sh cron"
+    echo ""
+    
+    # Show certificate details
+    openssl x509 -in "${CERT_DIR}/cert.pem" -noout -dates 2>/dev/null || true
+    
+    echo ""
+    print_warn "IMPORTANT: Configure SyncTV to use HTTPS"
+    echo "Add to your SyncTV config:"
+    echo "  server:"
+    echo "    https:"
+    echo "      enabled: true"
+    echo "      listen: \":443\""
+    echo "      cert_file: \"${CERT_DIR}/cert.pem\""
+    echo "      key_file: \"${CERT_DIR}/key.pem\""
+    echo ""
+    read -p "Restart SyncTV now to apply changes? (y/n): " restart_choice < /dev/tty
+    if [[ "$restart_choice" =~ ^[Yy]$ ]]; then
+        systemctl restart synctv
+        print_info "SyncTV restarted"
+    fi
 }
+
 show_menu() {
     clear
     echo "=========================================="
@@ -355,19 +485,48 @@ show_menu() {
     echo "=========================================="
     echo "1. Issue IP Certificate"
     echo "2. Show Certificate Info"
-    echo "3. Setup/Check Auto-Renewal"
+    echo "3. Check Auto-Renewal Status"
+    echo "4. Renew Certificate (Force)"
     echo "0. Exit"
     echo "=========================================="
 }
+
 check_root
 while true; do
     show_menu
-    read -p "Select option [0-3]: " choice < /dev/tty
+    read -p "Select option [0-4]: " choice < /dev/tty
     echo ""
     case $choice in
         1) issue_certificate ;;
-        2) check_acme_installed && { [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"; "$ACME_HOME/acme.sh" --list; } || print_error "acme.sh not installed" ;;
-        3) check_acme_installed && { crontab -l 2>/dev/null | grep -q "acme.sh" && print_info "Auto-renewal configured" || print_warn "Cron job not found"; } || print_error "acme.sh not installed" ;;
+        2) 
+            if check_acme_installed; then
+                [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
+                "$ACME_HOME/acme.sh" --list
+            else
+                print_error "acme.sh not installed"
+            fi
+            ;;
+        3)
+            if check_acme_installed; then
+                if crontab -l 2>/dev/null | grep -q "acme.sh"; then
+                    print_info "Auto-renewal is configured"
+                    crontab -l 2>/dev/null | grep "acme.sh"
+                else
+                    print_warn "Cron job not found"
+                fi
+            else
+                print_error "acme.sh not installed"
+            fi
+            ;;
+        4)
+            if check_acme_installed; then
+                read -p "Enter IP address to renew: " ip < /dev/tty
+                [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
+                "$ACME_HOME/acme.sh" --renew -d "$ip" --force
+            else
+                print_error "acme.sh not installed"
+            fi
+            ;;
         0) print_info "Exiting..."; exit 0 ;;
         *) print_error "Invalid option" ;;
     esac
