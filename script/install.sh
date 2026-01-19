@@ -279,13 +279,381 @@ EOF
 
     systemctl daemon-reload
     echo "/etc/systemd/system/synctv.service install success"
-    echo "run: systemctl enable synctv && systemctl start synctv"
+}
+
+function InstallManagementScript() {
+    echo "Installing management script..."
+    
+    # Create synctv-menu script
+    cat <<'MENU_EOF' > /usr/local/bin/synctv-menu
+#!/bin/bash
+
+# SyncTV Management Menu
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+function print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+function print_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+function print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+function check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        print_error "This operation requires root privileges"
+        return 1
+    fi
+    return 0
+}
+
+function get_service_status() {
+    if systemctl is-active --quiet synctv; then
+        echo -e "${GREEN}Running${NC}"
+    else
+        echo -e "${RED}Stopped${NC}"
+    fi
+}
+
+function start_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv start"
+        return 1
+    fi
+    
+    print_info "Starting SyncTV service..."
+    systemctl start synctv
+    
+    if [ $? -eq 0 ]; then
+        systemctl enable synctv >/dev/null 2>&1
+        print_info "SyncTV started successfully"
+        sleep 1
+        systemctl status synctv --no-pager -l
+    else
+        print_error "Failed to start SyncTV"
+        return 1
+    fi
+}
+
+function stop_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv stop"
+        return 1
+    fi
+    
+    print_info "Stopping SyncTV service..."
+    systemctl stop synctv
+    
+    if [ $? -eq 0 ]; then
+        print_info "SyncTV stopped successfully"
+    else
+        print_error "Failed to stop SyncTV"
+        return 1
+    fi
+}
+
+function restart_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv restart"
+        return 1
+    fi
+    
+    print_info "Restarting SyncTV service..."
+    systemctl restart synctv
+    
+    if [ $? -eq 0 ]; then
+        print_info "SyncTV restarted successfully"
+        sleep 1
+        systemctl status synctv --no-pager -l
+    else
+        print_error "Failed to restart SyncTV"
+        return 1
+    fi
+}
+
+function show_status() {
+    echo ""
+    echo "=========================================="
+    echo "  SyncTV Service Status"
+    echo "=========================================="
+    systemctl status synctv --no-pager -l
+    echo "=========================================="
+}
+
+function show_logs() {
+    echo ""
+    print_info "Showing SyncTV logs (Press Ctrl+C to exit)"
+    echo ""
+    sleep 1
+    journalctl -u synctv -f --no-pager
+}
+
+function show_logs_recent() {
+    echo ""
+    echo "=========================================="
+    echo "  Recent SyncTV Logs (Last 50 lines)"
+    echo "=========================================="
+    journalctl -u synctv -n 50 --no-pager
+    echo "=========================================="
+}
+
+function enable_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv enable"
+        return 1
+    fi
+    
+    print_info "Enabling SyncTV service..."
+    systemctl enable synctv
+    
+    if [ $? -eq 0 ]; then
+        print_info "SyncTV will start automatically on boot"
+    else
+        print_error "Failed to enable SyncTV"
+        return 1
+    fi
+}
+
+function disable_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv disable"
+        return 1
+    fi
+    
+    print_info "Disabling SyncTV service..."
+    systemctl disable synctv
+    
+    if [ $? -eq 0 ]; then
+        print_info "SyncTV will not start automatically on boot"
+    else
+        print_error "Failed to disable SyncTV"
+        return 1
+    fi
+}
+
+function uninstall_service() {
+    if ! check_root; then
+        echo "Please run: sudo synctv uninstall"
+        return 1
+    fi
+    
+    print_warn "This will uninstall SyncTV"
+    read -p "Are you sure? (yes/no): " confirm
+    
+    if [ "$confirm" != "yes" ]; then
+        print_info "Uninstallation cancelled"
+        return 0
+    fi
+    
+    # Check if uninstall script exists
+    if [ -f "/usr/local/bin/synctv-uninstall" ]; then
+        /usr/local/bin/synctv-uninstall
+    else
+        print_error "Uninstall script not found"
+        print_info "Manual uninstallation steps:"
+        echo "  1. systemctl stop synctv"
+        echo "  2. systemctl disable synctv"
+        echo "  3. rm /etc/systemd/system/synctv.service"
+        echo "  4. rm /usr/bin/synctv"
+        echo "  5. rm -rf /opt/synctv"
+        return 1
+    fi
+}
+
+function ssl_management() {
+    if ! check_root; then
+        echo "Please run: sudo synctv ssl"
+        return 1
+    fi
+    
+    if [ -f "/usr/local/bin/synctv-ssl" ]; then
+        /usr/local/bin/synctv-ssl
+    else
+        print_error "SSL management script not found"
+        return 1
+    fi
+}
+
+function show_version() {
+    if [ -f "/usr/bin/synctv" ]; then
+        /usr/bin/synctv version
+    else
+        print_error "SyncTV binary not found"
+    fi
+}
+
+function show_menu() {
+    clear
+    echo "=========================================="
+    echo "       SyncTV Management Panel"
+    echo "=========================================="
+    echo " Status: $(get_service_status)"
+    echo "=========================================="
+    echo " 1. Start Service"
+    echo " 2. Stop Service"
+    echo " 3. Restart Service"
+    echo " 4. Show Status"
+    echo " 5. View Logs (Live)"
+    echo " 6. View Recent Logs"
+    echo " 7. Enable Auto-Start"
+    echo " 8. Disable Auto-Start"
+    echo " 9. SSL Certificate Management"
+    echo " 10. Show Version"
+    echo " 11. Uninstall"
+    echo " 0. Exit"
+    echo "=========================================="
+}
+
+function handle_command() {
+    case "$1" in
+        start)
+            start_service
+            ;;
+        stop)
+            stop_service
+            ;;
+        restart)
+            restart_service
+            ;;
+        status)
+            show_status
+            ;;
+        logs)
+            show_logs
+            ;;
+        enable)
+            enable_service
+            ;;
+        disable)
+            disable_service
+            ;;
+        uninstall)
+            uninstall_service
+            ;;
+        ssl)
+            ssl_management
+            ;;
+        version)
+            show_version
+            ;;
+        menu|"")
+            # Show interactive menu
+            while true; do
+                show_menu
+                read -p "Please select an option [0-11]: " choice
+                echo ""
+                
+                case $choice in
+                    1)
+                        start_service
+                        ;;
+                    2)
+                        stop_service
+                        ;;
+                    3)
+                        restart_service
+                        ;;
+                    4)
+                        show_status
+                        ;;
+                    5)
+                        show_logs
+                        ;;
+                    6)
+                        show_logs_recent
+                        ;;
+                    7)
+                        enable_service
+                        ;;
+                    8)
+                        disable_service
+                        ;;
+                    9)
+                        ssl_management
+                        ;;
+                    10)
+                        show_version
+                        ;;
+                    11)
+                        uninstall_service
+                        if [ $? -eq 0 ]; then
+                            exit 0
+                        fi
+                        ;;
+                    0)
+                        print_info "Exiting..."
+                        exit 0
+                        ;;
+                    *)
+                        print_error "Invalid option"
+                        ;;
+                esac
+                
+                echo ""
+                read -p "Press Enter to continue..."
+            done
+            ;;
+        help|--help|-h)
+            echo "SyncTV Management Commands:"
+            echo "  synctv              - Show interactive menu"
+            echo "  synctv start        - Start service"
+            echo "  synctv stop         - Stop service"
+            echo "  synctv restart      - Restart service"
+            echo "  synctv status       - Show service status"
+            echo "  synctv logs         - View live logs"
+            echo "  synctv enable       - Enable auto-start"
+            echo "  synctv disable      - Disable auto-start"
+            echo "  synctv ssl          - SSL certificate management"
+            echo "  synctv version      - Show version"
+            echo "  synctv uninstall    - Uninstall SyncTV"
+            ;;
+        *)
+            print_error "Unknown command: $1"
+            echo "Run 'synctv help' for usage information"
+            exit 1
+            ;;
+    esac
+}
+
+# Main
+handle_command "$1"
+MENU_EOF
+
+    chmod +x /usr/local/bin/synctv-menu
+    
+    # Create symlink
+    ln -sf /usr/local/bin/synctv-menu /usr/local/bin/synctv
+    
+    # Copy SSL manager script
+    if [ -f "./script/ssl-manager.sh" ]; then
+        cp "./script/ssl-manager.sh" /usr/local/bin/synctv-ssl
+        chmod +x /usr/local/bin/synctv-ssl
+    fi
+    
+    # Copy uninstall script
+    if [ -f "./script/uninstall.sh" ]; then
+        cp "./script/uninstall.sh" /usr/local/bin/synctv-uninstall
+        chmod +x /usr/local/bin/synctv-uninstall
+    fi
+    
+    echo "Management script installed successfully"
+    echo "You can now use 'synctv' command to manage the service"
 }
 
 function InitSystemctlService() {
     case "$OS" in
     linux)
         InitLinuxSystemctlService
+        InstallManagementScript
         ;;
     esac
 }
@@ -304,8 +672,73 @@ function Install() {
     echo "install success"
 }
 
+function PostInstall() {
+    echo ""
+    echo "=========================================="
+    echo "  Installation Complete!"
+    echo "=========================================="
+    echo ""
+    
+    # Ask to start service
+    read -p "Do you want to start SyncTV now? (y/n): " start_choice
+    if [ "$start_choice" = "y" ] || [ "$start_choice" = "Y" ]; then
+        systemctl enable synctv
+        systemctl start synctv
+        
+        if [ $? -eq 0 ]; then
+            echo ""
+            echo "✓ SyncTV started successfully"
+            sleep 1
+            systemctl status synctv --no-pager -l
+        else
+            echo ""
+            echo "✗ Failed to start SyncTV"
+            echo "You can start it manually with: sudo systemctl start synctv"
+        fi
+    else
+        echo ""
+        echo "You can start SyncTV later with: sudo synctv start"
+    fi
+    
+    echo ""
+    echo "=========================================="
+    
+    # Ask about SSL configuration
+    read -p "Do you want to configure SSL certificate now? (y/n): " ssl_choice
+    if [ "$ssl_choice" = "y" ] || [ "$ssl_choice" = "Y" ]; then
+        echo ""
+        if [ -f "/usr/local/bin/synctv-ssl" ]; then
+            /usr/local/bin/synctv-ssl
+        else
+            echo "SSL management script not found"
+        fi
+    else
+        echo ""
+        echo "You can configure SSL later with: sudo synctv ssl"
+    fi
+    
+    echo ""
+    echo "=========================================="
+    echo "  Quick Start Guide"
+    echo "=========================================="
+    echo ""
+    echo "Management Commands:"
+    echo "  synctv              - Open management menu"
+    echo "  synctv start        - Start service"
+    echo "  synctv stop         - Stop service"
+    echo "  synctv restart      - Restart service"
+    echo "  synctv status       - Show service status"
+    echo "  synctv logs         - View live logs"
+    echo "  synctv ssl          - SSL certificate management"
+    echo "  synctv uninstall    - Uninstall SyncTV"
+    echo ""
+    echo "For more commands, run: synctv help"
+    echo "=========================================="
+}
+
 Init
 ParseArgs "$@"
 FixArgs
 Install
 InitSystemctlService
+PostInstall
