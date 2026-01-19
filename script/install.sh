@@ -377,72 +377,86 @@ get_public_ip() {
     return 1
 }
 
+get_current_http_port() {
+    # Try to detect current HTTP port from running service
+    local port=""
+    
+    # Method 1: Check if service is running and get port from netstat/ss
+    if systemctl is-active --quiet synctv 2>/dev/null; then
+        if command -v ss >/dev/null 2>&1; then
+            port=$(ss -ltnp 2>/dev/null | grep synctv | grep -oP ':\K[0-9]+' | head -1)
+        elif command -v netstat >/dev/null 2>&1; then
+            port=$(netstat -ltnp 2>/dev/null | grep synctv | grep -oP ':\K[0-9]+' | head -1)
+        fi
+    fi
+    
+    # Method 2: Check config file if exists
+    if [[ -z "$port" ]] && [[ -f "/opt/synctv/config.yaml" ]]; then
+        port=$(grep -A 2 "http:" /opt/synctv/config.yaml | grep "listen:" | grep -oP ':\K[0-9]+' | head -1)
+    fi
+    
+    # Default to 8080 if not found
+    echo "${port:-8080}"
+}
+
 issue_certificate() {
-    print_info "=== Issue Let's Encrypt IP Certificate ==="
+    print_info "=== Automatic SSL Certificate Setup ==="
     echo ""
     print_warn "IP certificates are valid for ~6 days and will auto-renew"
     print_warn "Port 80 must be open and accessible from the internet"
     echo ""
     
-    # Check for socat
+    # Auto-install dependencies if needed
     if ! command -v socat >/dev/null 2>&1; then
-        print_warn "socat is not installed (required for standalone mode)"
-        read -p "Install socat now? (y/n): " install_choice < /dev/tty
-        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
-            install_dependencies || {
-                print_error "Failed to install dependencies"
-                return 1
-            }
-        else
-            print_error "socat is required for standalone mode"
+        print_info "Installing required dependencies (socat)..."
+        install_dependencies || {
+            print_error "Failed to install dependencies"
             return 1
-        fi
+        }
     fi
     
-    check_acme_installed || {
-        print_warn "acme.sh is not installed"
-        read -p "Install acme.sh now? (y/n): " choice < /dev/tty
-        [[ "$choice" =~ ^[Yy]$ ]] && install_acme || { print_error "acme.sh required"; return 1; }
-    }
+    # Auto-install acme.sh if needed
+    if ! check_acme_installed; then
+        print_info "Installing acme.sh..."
+        install_acme || {
+            print_error "Failed to install acme.sh"
+            return 1
+        }
+    fi
     
-    # Get public IP
+    # Auto-detect public IP
     local detected_ip=$(get_public_ip)
-    if [[ -n "$detected_ip" ]]; then
-        print_info "Detected public IP: $detected_ip"
+    if [[ -z "$detected_ip" ]]; then
+        print_error "Failed to detect public IP address"
+        read -p "Please enter your public IPv4 address manually: " detected_ip < /dev/tty || detected_ip=""
+        [ -z "$detected_ip" ] && { print_error "IP address is required"; return 1; }
     fi
-    echo ""
     
-    read -p "Enter your public IPv4 address: " ipv4 < /dev/tty
-    [ -z "$ipv4" ] && { print_error "IP address cannot be empty"; return 1; }
+    print_info "Detected public IP: $detected_ip"
+    read -p "Use this IP address? (Y/n): " confirm_ip < /dev/tty || confirm_ip="y"
+    confirm_ip=${confirm_ip:-y}
+    
+    local ipv4="$detected_ip"
+    if [[ ! "$confirm_ip" =~ ^[Yy]$ ]]; then
+        read -p "Enter your public IPv4 address: " ipv4 < /dev/tty || ipv4="$detected_ip"
+        ipv4=${ipv4:-$detected_ip}
+    fi
+    
     is_valid_ipv4 "$ipv4" || { print_error "Invalid IPv4: $ipv4"; return 1; }
     
-    # Choose port for HTTP-01 listener
+    # Use port 80 for ACME validation (automatic)
     local WebPort=80
-    read -p "Port to use for ACME HTTP-01 listener (default 80): " WebPort < /dev/tty
-    WebPort="${WebPort:-80}"
-    if ! [[ "${WebPort}" =~ ^[0-9]+$ ]] || ((WebPort < 1 || WebPort > 65535)); then
-        print_warn "Invalid port. Using default 80"
-        WebPort=80
+    print_info "Using port 80 for certificate validation"
+    
+    # Check if port 80 is in use
+    if is_port_in_use 80; then
+        print_warn "Port 80 is in use, will temporarily stop SyncTV"
     fi
-    
-    # Check if port is in use
-    while is_port_in_use "${WebPort}"; do
-        print_warn "Port ${WebPort} is in use"
-        read -p "Enter another port (or press Enter to abort): " alt_port < /dev/tty
-        if [[ -z "$alt_port" ]]; then
-            print_error "Cannot proceed with port ${WebPort} in use"
-            return 1
-        fi
-        WebPort="$alt_port"
-    done
-    
-    print_info "Using port ${WebPort} for standalone validation"
     
     # Stop SyncTV temporarily to free port 80
-    if [[ "${WebPort}" -eq 80 ]]; then
-        print_info "Stopping SyncTV temporarily..."
-        systemctl stop synctv 2>/dev/null || true
-    fi
+    print_info "Stopping SyncTV temporarily..."
+    systemctl stop synctv 2>/dev/null || true
+    sleep 1
     
     # Create certificate directory
     mkdir -p "$CERT_DIR"
@@ -459,25 +473,23 @@ issue_certificate() {
         --server letsencrypt \
         --certificate-profile shortlived \
         --days 6 \
-        --httpport ${WebPort} \
+        --httpport 80 \
         --force
     
     local issue_result=$?
-    
-    # Restart SyncTV if we stopped it
-    if [[ "${WebPort}" -eq 80 ]]; then
-        print_info "Restarting SyncTV..."
-        systemctl start synctv 2>/dev/null || true
-    fi
     
     if [ $issue_result -ne 0 ]; then
         print_error "Failed to issue certificate"
         echo ""
         print_warn "Troubleshooting:"
-        echo "  1. Ensure port ${WebPort} is accessible from the internet"
+        echo "  1. Ensure port 80 is accessible from the internet"
         echo "  2. Check firewall settings"
         echo "  3. Verify IP address is correct: ${ipv4}"
         rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
+        
+        # Restart SyncTV even if failed
+        print_info "Restarting SyncTV..."
+        systemctl start synctv 2>/dev/null || true
         return 1
     fi
     
@@ -494,6 +506,7 @@ issue_certificate() {
     if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
         print_error "Certificate files not found after installation"
         rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
+        systemctl start synctv 2>/dev/null || true
         return 1
     fi
     
@@ -506,115 +519,88 @@ issue_certificate() {
     
     print_info "Certificate installed successfully!"
     echo ""
-    echo "Certificate files:"
-    echo "  Cert: ${CERT_DIR}/cert.pem"
-    echo "  Key:  ${CERT_DIR}/key.pem"
-    echo ""
-    print_info "Certificate valid for ~6 days, auto-renews via acme.sh cron"
+    
+    # Automatically configure HTTPS
+    configure_https_auto "$ipv4"
+}
+
+configure_https_auto() {
+    local ipv4="$1"
+    
+    print_info "=== Automatic HTTPS Configuration ==="
     echo ""
     
-    # Show certificate details
-    openssl x509 -in "${CERT_DIR}/cert.pem" -noout -dates 2>/dev/null || true
+    # Detect current HTTP port
+    local http_port=$(get_current_http_port)
+    local https_port=443
     
-    echo ""
-    echo "=========================================="
-    print_info "Certificate issued successfully!"
-    echo "=========================================="
-    echo ""
-    print_warn "NEXT STEP: Configure SyncTV to use HTTPS"
-    echo ""
-    echo "SyncTV needs to be configured to use the certificate."
-    echo "You have two options:"
-    echo ""
-    echo "Option 1: Automatic Configuration (Recommended)"
-    echo "  - Automatically update SyncTV settings"
-    echo "  - Enable HTTPS on port 443"
-    echo "  - Restart service"
-    echo ""
-    echo "Option 2: Manual Configuration"
-    echo "  - You configure SyncTV yourself"
-    echo "  - More control over settings"
+    print_info "Configuration:"
+    echo "  HTTP Port:  $http_port"
+    echo "  HTTPS Port: $https_port"
+    echo "  IP Address: $ipv4"
+    echo "  Force HTTPS: Enabled"
     echo ""
     
-    read -p "Choose option (1=Auto, 2=Manual, Enter=Auto): " config_choice < /dev/tty
-    config_choice=${config_choice:-1}
+    read -p "Accept this configuration? (Y/n): " accept_config < /dev/tty || accept_config="y"
+    accept_config=${accept_config:-y}
     
-    if [[ "$config_choice" == "1" ]]; then
-        print_info "Configuring SyncTV for HTTPS..."
-        
-        # Check if SyncTV binary supports cert command
-        if /usr/bin/synctv --help 2>&1 | grep -q "cert"; then
-            # Use SyncTV's built-in cert command if available
-            /usr/bin/synctv cert --cert-file "${CERT_DIR}/cert.pem" --key-file "${CERT_DIR}/key.pem" 2>/dev/null || true
-        fi
-        
-        # Create or update config file
-        local config_file="/opt/synctv/config.yaml"
-        if [ ! -f "$config_file" ]; then
-            print_info "Creating HTTPS configuration..."
-            cat > "$config_file" <<EOF
+    if [[ ! "$accept_config" =~ ^[Yy]$ ]]; then
+        print_warn "Configuration cancelled"
+        systemctl start synctv 2>/dev/null || true
+        return 1
+    fi
+    
+    # Create config file with force_https enabled
+    local config_file="/opt/synctv/config.yaml"
+    print_info "Creating HTTPS configuration with force_https enabled..."
+    
+    cat > "$config_file" <<EOF
 server:
   http:
-    listen: ":8080"
+    listen: ":${http_port}"
   https:
     enabled: true
-    listen: ":443"
+    listen: ":${https_port}"
     cert_file: "${CERT_DIR}/cert.pem"
     key_file: "${CERT_DIR}/key.pem"
+    force_https: true
 EOF
-            print_info "Configuration file created at $config_file"
-        else
-            print_warn "Config file exists. Please manually add HTTPS configuration:"
-            echo ""
-            echo "Add these lines to $config_file:"
-            echo ""
-            echo "server:"
-            echo "  https:"
-            echo "    enabled: true"
-            echo "    listen: \":443\""
-            echo "    cert_file: \"${CERT_DIR}/cert.pem\""
-            echo "    key_file: \"${CERT_DIR}/key.pem\""
-            echo ""
-        fi
-        
-        # Restart SyncTV
-        print_info "Restarting SyncTV..."
-        systemctl restart synctv
-        sleep 2
-        
-        if systemctl is-active --quiet synctv; then
-            print_info "✓ SyncTV restarted successfully"
-            echo ""
-            echo "=========================================="
-            print_info "HTTPS is now enabled!"
-            echo "=========================================="
-            echo ""
-            echo "Access your SyncTV instance:"
-            echo "  HTTP:  http://${ipv4}:8080"
-            echo "  HTTPS: https://${ipv4}:443"
-            echo ""
-            print_warn "Note: You may need to open port 443 in your firewall"
-        else
-            print_error "Failed to restart SyncTV"
-            echo "Check logs with: sudo journalctl -u synctv -n 50"
-        fi
+    
+    if [ $? -eq 0 ]; then
+        print_info "✓ Configuration file created at $config_file"
     else
-        print_info "Manual configuration selected"
+        print_error "Failed to create configuration file"
+        systemctl start synctv 2>/dev/null || true
+        return 1
+    fi
+    
+    # Restart SyncTV with new configuration
+    print_info "Restarting SyncTV with HTTPS enabled..."
+    systemctl start synctv 2>/dev/null || systemctl restart synctv 2>/dev/null
+    sleep 2
+    
+    if systemctl is-active --quiet synctv; then
+        print_info "✓ SyncTV started successfully with HTTPS"
         echo ""
-        echo "To enable HTTPS, add this to your SyncTV config:"
+        echo "=========================================="
+        print_info "HTTPS Configuration Complete!"
+        echo "=========================================="
         echo ""
-        echo "File: /opt/synctv/config.yaml"
+        echo "Access your SyncTV instance:"
+        echo "  HTTPS: https://${ipv4}:${https_port} (Primary)"
+        echo "  HTTP:  http://${ipv4}:${http_port} (Redirects to HTTPS)"
         echo ""
-        echo "server:"
-        echo "  http:"
-        echo "    listen: \":8080\""
-        echo "  https:"
-        echo "    enabled: true"
-        echo "    listen: \":443\""
-        echo "    cert_file: \"${CERT_DIR}/cert.pem\""
-        echo "    key_file: \"${CERT_DIR}/key.pem\""
+        print_info "Certificate valid for ~6 days, auto-renews via acme.sh cron"
+        print_warn "Note: You may need to open port ${https_port} in your firewall"
         echo ""
-        echo "Then restart: sudo systemctl restart synctv"
+    else
+        print_error "Failed to start SyncTV"
+        echo ""
+        print_warn "Checking service status..."
+        systemctl status synctv --no-pager -l
+        echo ""
+        print_warn "Check logs with: sudo journalctl -u synctv -n 50"
+        return 1
     fi
 }
 
