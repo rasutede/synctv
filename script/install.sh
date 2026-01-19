@@ -400,61 +400,49 @@ get_current_http_port() {
 }
 
 issue_certificate() {
-    print_info "=== Automatic SSL Certificate Setup ==="
-    echo ""
-    print_warn "IP certificates are valid for ~6 days and will auto-renew"
-    print_warn "Port 80 must be open and accessible from the internet"
+    print_info "=== SSL 证书配置 ==="
     echo ""
     
     # Auto-install dependencies if needed
     if ! command -v socat >/dev/null 2>&1; then
-        print_info "Installing required dependencies (socat)..."
+        print_info "正在安装依赖 (socat)..."
         install_dependencies || {
-            print_error "Failed to install dependencies"
+            print_error "依赖安装失败"
             return 1
         }
     fi
     
     # Auto-install acme.sh if needed
     if ! check_acme_installed; then
-        print_info "Installing acme.sh..."
+        print_info "正在安装 acme.sh..."
         install_acme || {
-            print_error "Failed to install acme.sh"
+            print_error "acme.sh 安装失败"
             return 1
         }
     fi
     
     # Auto-detect public IP
+    print_info "正在检测公网IP..."
     local detected_ip=$(get_public_ip)
     if [[ -z "$detected_ip" ]]; then
-        print_error "Failed to detect public IP address"
-        read -p "Please enter your public IPv4 address manually: " detected_ip < /dev/tty || detected_ip=""
-        [ -z "$detected_ip" ] && { print_error "IP address is required"; return 1; }
+        print_warn "无法自动检测公网IP"
+        read -p "请输入您的公网IPv4地址: " detected_ip < /dev/tty || detected_ip=""
+        [ -z "$detected_ip" ] && { print_error "IP地址不能为空"; return 1; }
+    else
+        print_info "检测到公网IP: $detected_ip"
     fi
     
-    print_info "Detected public IP: $detected_ip"
-    read -p "Use this IP address? (Y/n): " confirm_ip < /dev/tty || confirm_ip="y"
-    confirm_ip=${confirm_ip:-y}
+    # Ask user to confirm or modify IP
+    read -p "使用此IP地址? 直接回车确认，或输入其他IP: " user_ip < /dev/tty || user_ip=""
+    local ipv4="${user_ip:-$detected_ip}"
     
-    local ipv4="$detected_ip"
-    if [[ ! "$confirm_ip" =~ ^[Yy]$ ]]; then
-        read -p "Enter your public IPv4 address: " ipv4 < /dev/tty || ipv4="$detected_ip"
-        ipv4=${ipv4:-$detected_ip}
-    fi
+    # Validate IP
+    is_valid_ipv4 "$ipv4" || { print_error "无效的IPv4地址: $ipv4"; return 1; }
     
-    is_valid_ipv4 "$ipv4" || { print_error "Invalid IPv4: $ipv4"; return 1; }
-    
-    # Use port 80 for ACME validation (automatic)
-    local WebPort=80
-    print_info "Using port 80 for certificate validation"
-    
-    # Check if port 80 is in use
-    if is_port_in_use 80; then
-        print_warn "Port 80 is in use, will temporarily stop SyncTV"
-    fi
+    print_info "将为 $ipv4 签发证书"
     
     # Stop SyncTV temporarily to free port 80
-    print_info "Stopping SyncTV temporarily..."
+    print_info "正在临时停止 SyncTV 服务..."
     systemctl stop synctv 2>/dev/null || true
     sleep 1
     
@@ -465,7 +453,11 @@ issue_certificate() {
     [ -f "$ACME_HOME/acme.sh.env" ] && . "$ACME_HOME/acme.sh.env"
     
     # Issue certificate with standalone mode
-    print_info "Issuing certificate for ${ipv4}..."
+    print_info "正在签发证书..."
+    print_warn "证书有效期约6天，将自动续期"
+    print_warn "请确保端口80可从公网访问"
+    echo ""
+    
     "$ACME_HOME/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
     "$ACME_HOME/acme.sh" --issue \
         -d "${ipv4}" \
@@ -479,21 +471,21 @@ issue_certificate() {
     local issue_result=$?
     
     if [ $issue_result -ne 0 ]; then
-        print_error "Failed to issue certificate"
+        print_error "证书签发失败"
         echo ""
-        print_warn "Troubleshooting:"
-        echo "  1. Ensure port 80 is accessible from the internet"
-        echo "  2. Check firewall settings"
-        echo "  3. Verify IP address is correct: ${ipv4}"
+        print_warn "故障排查："
+        echo "  1. 确保端口80可从公网访问"
+        echo "  2. 检查防火墙设置"
+        echo "  3. 验证IP地址正确: ${ipv4}"
         rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
         
         # Restart SyncTV even if failed
-        print_info "Restarting SyncTV..."
+        print_info "正在重启 SyncTV..."
         systemctl start synctv 2>/dev/null || true
         return 1
     fi
     
-    print_info "Certificate issued successfully, installing..."
+    print_info "证书签发成功，正在安装..."
     
     # Install certificate
     local reloadCmd="systemctl restart synctv 2>/dev/null || true"
@@ -504,7 +496,7 @@ issue_certificate() {
     
     # Verify certificate files exist
     if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
-        print_error "Certificate files not found after installation"
+        print_error "证书文件安装后未找到"
         rm -rf ~/.acme.sh/${ipv4} 2>/dev/null
         systemctl start synctv 2>/dev/null || true
         return 1
@@ -517,7 +509,7 @@ issue_certificate() {
     # Enable auto-upgrade
     "$ACME_HOME/acme.sh" --upgrade --auto-upgrade >/dev/null 2>&1
     
-    print_info "Certificate installed successfully!"
+    print_info "✓ 证书安装成功"
     echo ""
     
     # Automatically configure HTTPS
@@ -527,32 +519,49 @@ issue_certificate() {
 configure_https_auto() {
     local ipv4="$1"
     
-    print_info "=== Automatic HTTPS Configuration ==="
+    print_info "=== 配置 HTTPS ==="
     echo ""
     
     # Detect current HTTP port
-    local http_port=$(get_current_http_port)
-    local https_port=443
+    local detected_http_port=$(get_current_http_port)
+    local detected_https_port=443
     
-    print_info "Configuration:"
-    echo "  HTTP Port:  $http_port"
-    echo "  HTTPS Port: $https_port"
-    echo "  IP Address: $ipv4"
-    echo "  Force HTTPS: Enabled"
+    print_info "自动检测到的配置："
+    echo "  HTTP端口:  $detected_http_port"
+    echo "  HTTPS端口: $detected_https_port"
+    echo "  IP地址:    $ipv4"
+    echo "  强制HTTPS: 启用"
     echo ""
     
-    read -p "Accept this configuration? (Y/n): " accept_config < /dev/tty || accept_config="y"
-    accept_config=${accept_config:-y}
+    # Ask user to confirm or customize
+    read -p "HTTP端口 (直接回车使用 $detected_http_port): " user_http_port < /dev/tty || user_http_port=""
+    local http_port="${user_http_port:-$detected_http_port}"
     
-    if [[ ! "$accept_config" =~ ^[Yy]$ ]]; then
-        print_warn "Configuration cancelled"
-        systemctl start synctv 2>/dev/null || true
-        return 1
+    read -p "HTTPS端口 (直接回车使用 $detected_https_port): " user_https_port < /dev/tty || user_https_port=""
+    local https_port="${user_https_port:-$detected_https_port}"
+    
+    # Validate ports
+    if ! [[ "$http_port" =~ ^[0-9]+$ ]] || ((http_port < 1 || http_port > 65535)); then
+        print_warn "HTTP端口无效，使用默认值 $detected_http_port"
+        http_port=$detected_http_port
     fi
+    
+    if ! [[ "$https_port" =~ ^[0-9]+$ ]] || ((https_port < 1 || https_port > 65535)); then
+        print_warn "HTTPS端口无效，使用默认值 $detected_https_port"
+        https_port=$detected_https_port
+    fi
+    
+    echo ""
+    print_info "最终配置："
+    echo "  HTTP端口:  $http_port"
+    echo "  HTTPS端口: $https_port"
+    echo "  IP地址:    $ipv4"
+    echo "  强制HTTPS: 启用"
+    echo ""
     
     # Create config file with force_https enabled
     local config_file="/opt/synctv/config.yaml"
-    print_info "Creating HTTPS configuration with force_https enabled..."
+    print_info "正在创建配置文件..."
     
     cat > "$config_file" <<EOF
 server:
@@ -567,39 +576,39 @@ server:
 EOF
     
     if [ $? -eq 0 ]; then
-        print_info "✓ Configuration file created at $config_file"
+        print_info "✓ 配置文件已创建: $config_file"
     else
-        print_error "Failed to create configuration file"
+        print_error "配置文件创建失败"
         systemctl start synctv 2>/dev/null || true
         return 1
     fi
     
     # Restart SyncTV with new configuration
-    print_info "Restarting SyncTV with HTTPS enabled..."
+    print_info "正在启动 SyncTV..."
     systemctl start synctv 2>/dev/null || systemctl restart synctv 2>/dev/null
     sleep 2
     
     if systemctl is-active --quiet synctv; then
-        print_info "✓ SyncTV started successfully with HTTPS"
+        print_info "✓ SyncTV 已成功启动"
         echo ""
         echo "=========================================="
-        print_info "HTTPS Configuration Complete!"
+        print_info "HTTPS 配置完成！"
         echo "=========================================="
         echo ""
-        echo "Access your SyncTV instance:"
-        echo "  HTTPS: https://${ipv4}:${https_port} (Primary)"
-        echo "  HTTP:  http://${ipv4}:${http_port} (Redirects to HTTPS)"
+        echo "访问地址："
+        echo "  HTTPS: https://${ipv4}:${https_port} (主要)"
+        echo "  HTTP:  http://${ipv4}:${http_port} (自动跳转到HTTPS)"
         echo ""
-        print_info "Certificate valid for ~6 days, auto-renews via acme.sh cron"
-        print_warn "Note: You may need to open port ${https_port} in your firewall"
+        print_info "证书有效期约6天，通过acme.sh自动续期"
+        print_warn "注意: 您可能需要在防火墙中开放端口 ${https_port}"
         echo ""
     else
-        print_error "Failed to start SyncTV"
+        print_error "SyncTV 启动失败"
         echo ""
-        print_warn "Checking service status..."
+        print_warn "正在检查服务状态..."
         systemctl status synctv --no-pager -l
         echo ""
-        print_warn "Check logs with: sudo journalctl -u synctv -n 50"
+        print_warn "查看日志: sudo journalctl -u synctv -n 50"
         return 1
     fi
 }
